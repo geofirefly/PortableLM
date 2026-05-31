@@ -142,6 +142,28 @@ LOG_MODE_ERRORS_ONLY = "errors_only"
 LOG_MODE_ALL = "all"
 DEFAULT_LOG_MODE = LOG_MODE_ERRORS_ONLY
 
+def _server_bind_host(argv=None):
+    """Return the HTTP bind address.
+
+    Loopback is the safe default. LAN/mobile access is useful for the
+    portable-SSD workflow, but it must be an explicit operator choice.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    return "0.0.0.0" if "--lan" in argv else "127.0.0.1"
+
+def _resolve_static_path(request_path):
+    """Resolve a static request path and keep it inside SCRIPT_DIR."""
+    safe_path = os.path.normpath(request_path.lstrip("/"))
+    base = os.path.realpath(SCRIPT_DIR)
+    full_path = os.path.realpath(os.path.join(base, safe_path))
+    try:
+        if os.path.commonpath([base, full_path]) != base:
+            return None
+    except ValueError:
+        return None
+    return full_path
+
 # Lock shared file persistence paths to avoid concurrent write corruption.
 DATA_FILE_LOCK = threading.RLock()
 LOG_MODE_LOCK = threading.RLock()
@@ -738,7 +760,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
     def _build_request_context(self, api_source):
         headers = {}
-        for key in ("User-Agent", "Authorization"):
+        for key in ("User-Agent",):
             value = self.headers.get(key)
             if value:
                 headers[key] = value
@@ -875,11 +897,10 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_static(self, path):
         """Serve static files (CSS, JS, images) from SCRIPT_DIR."""
-        safe_path = os.path.normpath(path.lstrip("/"))
-        full_path = os.path.join(SCRIPT_DIR, safe_path)
+        full_path = _resolve_static_path(path)
 
         # Security: don't allow path traversal
-        if not full_path.startswith(SCRIPT_DIR):
+        if full_path is None:
             self.send_response(403)
             self.end_headers()
             return
@@ -1397,13 +1418,18 @@ def main():
     except Exception:
         pass
 
+    bind_host = _server_bind_host()
+
     print()
     print("=" * 55)
     print("  Portable AI — Chat Server")
     print("=" * 55)
     print()
     print(f"  Local Access:    http://localhost:{CHAT_SERVER_PORT}")
-    print(f"  Network Access:  http://{local_ip}:{CHAT_SERVER_PORT}   <-- Use this on phone/other PC!")
+    if bind_host == "0.0.0.0":
+        print(f"  Network Access:  http://{local_ip}:{CHAT_SERVER_PORT}   <-- LAN mode enabled")
+    else:
+        print("  Network Access:  disabled by default; restart with --lan only on a trusted network")
     print(f"  Ollama/Llama Proxy: {OLLAMA_HOST}")
     if LLAMA_CPP_MODE:
         print("  Running in LLAMA_CPP_MODE (Translating API requests)")
@@ -1413,7 +1439,12 @@ def main():
     print()
     print("-" * 55)
 
-    server = ThreadedHTTPServer(("0.0.0.0", CHAT_SERVER_PORT), ChatHandler)
+    if bind_host == "0.0.0.0":
+        print("  WARNING: LAN mode enabled; this server is reachable by other devices on the network.")
+    else:
+        print("  LAN mode disabled by default. Restart with --lan only on a trusted network.")
+
+    server = ThreadedHTTPServer((bind_host, CHAT_SERVER_PORT), ChatHandler)
 
     # Open browser in background thread
     if "--no-browser" not in sys.argv:

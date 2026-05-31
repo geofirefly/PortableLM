@@ -112,7 +112,7 @@ echo  Close this window to shut down everything.
 echo ===================================================
 echo.
 
-%PYTHON_CMD% "%~dp0..\Shared\chat_server.py"
+%PYTHON_CMD% "%~dp0..\Shared\chat_server.py" %*
 
 echo Shutting down...
 taskkill /f /im ollama-windows.exe >nul 2>&1

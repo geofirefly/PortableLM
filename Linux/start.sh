@@ -67,9 +67,9 @@ echo ""
 
 # Launch Python chat server using system Python
 if command -v python3 &> /dev/null; then
-    python3 "$SHARED_DIR/chat_server.py"
+    python3 "$SHARED_DIR/chat_server.py" "$@"
 elif command -v python &> /dev/null; then
-    python "$SHARED_DIR/chat_server.py"
+    python "$SHARED_DIR/chat_server.py" "$@"
 else
     echo "ERROR: Python not found. Please install python3 via your package manager."
     exit 1

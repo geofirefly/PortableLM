@@ -131,9 +131,14 @@ bash Android/start.sh
 
 ## LAN Mobile Access
 
+For safety, the chat server should bind to localhost by default. Only enable LAN/mobile access on a trusted network.
+
 Use your PC's AI from your phone on the couch:
 
-1. PC running the start script + phone on same WiFi.
+1. PC running the start script with explicit LAN mode + phone on same WiFi.
+   - Linux: `bash Linux/start.sh --lan`
+   - Windows: `Windows/start-fast-chat.bat --lan`
+   - Android: `bash Android/start.sh --lan`
 2. Terminal shows a **Network Access** IP (e.g., `http://192.168.1.15:3333`).
 3. Open that URL on your phone browser.
 

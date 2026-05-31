@@ -115,9 +115,9 @@ echo -e "\033[0;37m  Starting background server... Press Ctrl+C to shut down the
 
 # Start the python proxy server so FastChatUI works and saves history
 if command -v python3 &> /dev/null; then
-    python3 "$SHARED_DIR/chat_server.py" --no-browser --llama-cpp
+    python3 "$SHARED_DIR/chat_server.py" --no-browser --llama-cpp "$@"
 elif command -v python &> /dev/null; then
-    python "$SHARED_DIR/chat_server.py" --no-browser --llama-cpp
+    python "$SHARED_DIR/chat_server.py" --no-browser --llama-cpp "$@"
 else
     echo "ERROR: Python not found! Install with: apt install python -y"
     # Cleanup
