@@ -80,7 +80,7 @@ Otherwise, manually drop `.gguf` files into `Shared/models`.
 | **Linux** | `bash Linux/start.sh` |
 | **Android** | `bash Android/start.sh` |
 
-The engine spins up and your browser opens the locally-served Chat UI.
+The engine spins up and your browser opens the locally-served Chat UI. The server prints a per-run access-token URL; use that exact URL for API access.
 
 ---
 
@@ -131,16 +131,19 @@ bash Android/start.sh
 
 ## LAN Mobile Access
 
-For safety, the chat server should bind to localhost by default. Only enable LAN/mobile access on a trusted network.
+For safety, the chat server binds to localhost by default. Only enable LAN/mobile access on a trusted network.
+
+The chat server generates a per-run access token and prints URLs with `?access_token=...`. Use the printed URL instead of typing a bare `http://host:3333` address; API, chat-history, engine-control, image-generation, and Ollama proxy endpoints reject requests without the token.
 
 Use your PC's AI from your phone on the couch:
 
 1. PC running the start script with explicit LAN mode + phone on same WiFi.
    - Linux: `bash Linux/start.sh --lan`
+   - macOS: `bash Mac/start.command --lan`
    - Windows: `Windows/start-fast-chat.bat --lan`
    - Android: `bash Android/start.sh --lan`
-2. Terminal shows a **Network Access** IP (e.g., `http://192.168.1.15:3333`).
-3. Open that URL on your phone browser.
+2. Terminal shows a **Network Access** URL (e.g., `http://192.168.1.15:3333/?access_token=...`).
+3. Open that exact URL on your phone browser.
 
 > If pages don't load, check that Windows Firewall allows port `3333`.
 

@@ -66,9 +66,9 @@ echo ""
 
 # Launch Python chat server using system Python (comes pre-installed on Mac)
 if command -v python3 &> /dev/null; then
-    python3 "$SHARED_DIR/chat_server.py"
+    python3 "$SHARED_DIR/chat_server.py" "$@"
 elif command -v python &> /dev/null; then
-    python "$SHARED_DIR/chat_server.py"
+    python "$SHARED_DIR/chat_server.py" "$@"
 else
     echo "ERROR: Python not found. Please type 'brew install python' in terminal."
     exit 1

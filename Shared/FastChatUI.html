@@ -2668,6 +2668,19 @@
       imgModalDownload: $('#img-modal-download'),
     };
 
+      const ACCESS_TOKEN = new URLSearchParams(window.location.search).get('access_token') || sessionStorage.getItem('portablelm_access_token') || '';
+      if (ACCESS_TOKEN) sessionStorage.setItem('portablelm_access_token', ACCESS_TOKEN);
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input && input.url;
+        if (ACCESS_TOKEN && url && (url.startsWith('/api/') || url.startsWith('/ollama/'))) {
+          const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+          headers.set('X-PortableLM-Token', ACCESS_TOKEN);
+          init = { ...init, headers };
+        }
+        return nativeFetch(input, init);
+      };
+
       // ÔöÇÔöÇ Init ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
       async function init() {
         setupMarked();

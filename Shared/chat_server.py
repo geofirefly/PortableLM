@@ -28,6 +28,7 @@ import uuid
 import subprocess
 import base64
 import re
+import secrets
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -141,6 +142,8 @@ LOG_FILE = os.path.join(LOG_DIR, "chat_server.log")
 LOG_MODE_ERRORS_ONLY = "errors_only"
 LOG_MODE_ALL = "all"
 DEFAULT_LOG_MODE = LOG_MODE_ERRORS_ONLY
+ACCESS_TOKEN = os.environ.get('PORTABLELM_ACCESS_TOKEN') or secrets.token_urlsafe(24)
+DEFAULT_ALLOWED_ORIGIN = f"http://127.0.0.1:{CHAT_SERVER_PORT}"
 
 def _server_bind_host(argv=None):
     """Return the HTTP bind address.
@@ -153,8 +156,22 @@ def _server_bind_host(argv=None):
     return "0.0.0.0" if "--lan" in argv else "127.0.0.1"
 
 def _resolve_static_path(request_path):
-    """Resolve a static request path and keep it inside SCRIPT_DIR."""
+    """Resolve an allowlisted static request path inside SCRIPT_DIR."""
     safe_path = os.path.normpath(request_path.lstrip("/"))
+    if safe_path in ("", "."):
+        safe_path = "FastChatUI.html"
+    if safe_path == "index.html":
+        safe_path = "FastChatUI.html"
+    if safe_path.startswith("..") or os.path.isabs(safe_path):
+        return None
+
+    # Only expose the UI and explicit static asset directories. Do not allow
+    # browsing chat_data, logs, models, bin, runtime folders, or arbitrary files
+    # under the portable Shared directory.
+    allowed = safe_path == "FastChatUI.html" or safe_path.startswith(("assets/", "vendor/", "static/"))
+    if not allowed:
+        return None
+
     base = os.path.realpath(SCRIPT_DIR)
     full_path = os.path.realpath(os.path.join(base, safe_path))
     try:
@@ -163,6 +180,17 @@ def _resolve_static_path(request_path):
     except ValueError:
         return None
     return full_path
+
+
+def _allowed_origin():
+    """Return the browser origin allowed to read API responses."""
+    return os.environ.get("PORTABLELM_ALLOW_ORIGIN") or DEFAULT_ALLOWED_ORIGIN
+
+
+def _access_token_from_path(path):
+    query = parse_qs(urlparse(path).query)
+    values = query.get("access_token") or []
+    return values[0] if values else None
 
 # Lock shared file persistence paths to avoid concurrent write corruption.
 DATA_FILE_LOCK = threading.RLock()
@@ -777,6 +805,26 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         length = _safe_int(self.headers.get("Content-Length"), 0)
         return self.rfile.read(length) if length > 0 else b""
 
+    def _require_access_token(self):
+        """Require the per-run token for sensitive local APIs."""
+        supplied = _access_token_from_path(getattr(self, "path", ""))
+        self._portablelm_auth_header_consumed = False
+        auth = self.headers.get("Authorization") if getattr(self, "headers", None) else None
+        if auth and auth.startswith("Bearer "):
+            supplied = auth[len("Bearer "):].strip()
+            if secrets.compare_digest(supplied, ACCESS_TOKEN):
+                self._portablelm_auth_header_consumed = True
+        header_token = self.headers.get("X-PortableLM-Token") if getattr(self, "headers", None) else None
+        if header_token:
+            supplied = header_token.strip()
+            self._portablelm_auth_header_consumed = False
+        if supplied and secrets.compare_digest(supplied, ACCESS_TOKEN):
+            return True
+        self.send_response(403)
+        self._cors_headers()
+        self.end_headers()
+        return False
+
     def log_message(self, format, *args):
         """Print all requests for easy debugging."""
         msg = format % args
@@ -792,9 +840,11 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
     # ── CORS headers ───────────────────────────────────────────
     def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", _allowed_origin())
+        self.send_header("Vary", "Origin")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-PortableLM-Token")
 
     def do_OPTIONS(self):
         """Handle CORS preflight."""
@@ -812,30 +862,44 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         # Chat data API
         elif path == "/api/chats":
+            if not self._require_access_token():
+                return
             self._get_chats()
 
         # Settings API
         elif path == "/api/settings":
+            if not self._require_access_token():
+                return
             self._get_settings()
 
         # Hardware stats API
         elif path == "/api/stats":
+            if not self._require_access_token():
+                return
             self._get_stats()
 
         # Engine status API
         elif path == "/api/engine-status":
+            if not self._require_access_token():
+                return
             self._get_engine_status()
 
         # Image model info API
         elif path == "/api/image-models":
+            if not self._require_access_token():
+                return
             self._get_image_models()
 
         # Image generation progress API
         elif path == "/api/image-progress":
+            if not self._require_access_token():
+                return
             self._get_image_progress()
 
         # Proxy Ollama API
         elif path.startswith("/ollama/"):
+            if not self._require_access_token():
+                return
             self._proxy_ollama("GET")
 
         else:
@@ -846,24 +910,36 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         if path == "/api/chats":
+            if not self._require_access_token():
+                return
             self._save_chats()
 
         elif path == "/api/settings":
+            if not self._require_access_token():
+                return
             self._save_settings()
 
         # Image generation API
         elif path == "/api/generate-image":
+            if not self._require_access_token():
+                return
             self._generate_image()
 
         # Engine control APIs
         elif path == "/api/stop-ollama":
+            if not self._require_access_token():
+                return
             self._stop_ollama_endpoint()
 
         elif path == "/api/start-ollama":
+            if not self._require_access_token():
+                return
             self._start_ollama_endpoint()
 
         # Proxy Ollama API
         elif path.startswith("/ollama/"):
+            if not self._require_access_token():
+                return
             self._proxy_ollama("POST")
 
         else:
@@ -874,6 +950,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = urlparse(self.path).path
         if path.startswith("/ollama/"):
+            if not self._require_access_token():
+                return
             self._proxy_ollama("DELETE")
         else:
             self.send_response(404)
@@ -1265,8 +1343,9 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 headers={"Content-Type": self.headers.get("Content-Type", "application/json")}
             )
 
-            # Optional: pass Authorization header if present
-            if "Authorization" in self.headers:
+            # Optional: pass upstream Authorization only if it was not consumed
+            # as PortableLM's local access token.
+            if "Authorization" in self.headers and not getattr(self, "_portablelm_auth_header_consumed", False):
                 req.add_header("Authorization", self.headers.get("Authorization"))
 
             response = urllib.request.urlopen(req, timeout=600)
@@ -1401,7 +1480,7 @@ LOGGER, LOG_LISTENER = configure_logging()
 def open_browser_delayed():
     """Open the browser after a short delay to ensure server is ready."""
     time.sleep(1.0)
-    webbrowser.open(f"http://localhost:{CHAT_SERVER_PORT}")
+    webbrowser.open(f"http://localhost:{CHAT_SERVER_PORT}/?access_token={ACCESS_TOKEN}")
 
 def main():
     ensure_data_dir()
@@ -1425,9 +1504,9 @@ def main():
     print("  Portable AI — Chat Server")
     print("=" * 55)
     print()
-    print(f"  Local Access:    http://localhost:{CHAT_SERVER_PORT}")
+    print(f"  Local Access:    http://localhost:{CHAT_SERVER_PORT}/?access_token={ACCESS_TOKEN}")
     if bind_host == "0.0.0.0":
-        print(f"  Network Access:  http://{local_ip}:{CHAT_SERVER_PORT}   <-- LAN mode enabled")
+        print(f"  Network Access:  http://{local_ip}:{CHAT_SERVER_PORT}/?access_token={ACCESS_TOKEN}   <-- LAN mode enabled")
     else:
         print("  Network Access:  disabled by default; restart with --lan only on a trusted network")
     print(f"  Ollama/Llama Proxy: {OLLAMA_HOST}")
