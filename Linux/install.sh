@@ -111,6 +111,18 @@ is_elf() {
 }
 
 # ----------------------------------------------------------------
+# Helper: validate Ollama runtime is complete
+# ----------------------------------------------------------------
+ollama_runtime_ok() {
+    local bin=$1
+    [ -f "$bin" ] || return 1
+    is_elf "$bin" || return 1
+    file_ok "$bin" 10000000 || return 1
+    [ -f "$SHARED_DIR/lib/ollama/llama-server" ] || return 1
+    return 0
+}
+
+# ----------------------------------------------------------------
 # Helper: disk free space in GB (integer)
 # ----------------------------------------------------------------
 free_gb() {
@@ -489,12 +501,15 @@ echo -e "${YLW}[6/7] Downloading Ollama AI Engine (Linux)...${RST}"
 
 OLLAMA_BIN="$SHARED_BIN/ollama-linux"
 
-# Validate: must exist, be a real ELF binary, and > 10 MB
-if [ -f "$OLLAMA_BIN" ] && is_elf "$OLLAMA_BIN" && file_ok "$OLLAMA_BIN" 10000000; then
+if ollama_runtime_ok "$OLLAMA_BIN"; then
     echo -e "${GRN}      Ollama already installed! Skipping...${RST}"
 else
-    # Remove any stale/corrupted file
-    rm -f "$OLLAMA_BIN"
+    # If binary exists but runtime is incomplete, remove stale files to force refresh
+    if [ -f "$OLLAMA_BIN" ] && ! ollama_runtime_ok "$OLLAMA_BIN"; then
+        echo -e "${YLW}      Ollama binary found but runtime files missing. Refreshing...${RST}"
+        rm -f "$OLLAMA_BIN"
+        rm -rf "$SHARED_DIR/lib"
+    fi
 
     # Check drive root for existing binary
     if copy_from_drive_root "ollama-linux" "$OLLAMA_BIN" 10000000; then
@@ -510,23 +525,20 @@ else
     if [ ! -f "$OLLAMA_BIN" ]; then
         ARCHIVE_URL="https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
 
-        echo -e "      Downloading Ollama engine (streaming - stops after binary extracted)..."
-        # Stream curl → tar: since bin/ollama is the FIRST entry in the archive,
-        # tar exits after extracting it and the pipe breaks — we never download
-        # the hundreds of MB of CUDA libs that follow.
-        curl -L --fail "$ARCHIVE_URL" |  \
-            tar --use-compress-program=zstd -xf - -C "$SHARED_BIN" \
-                --strip-components=1 bin/ollama 2>/dev/null
-        PIPE_RC=${PIPESTATUS[1]}   # tar exit code (0 = extracted successfully)
+        echo -e "      Downloading Ollama engine (full archive)..."
+        curl -L --fail "$ARCHIVE_URL" | \
+            tar --use-compress-program=zstd -xf - -C "$SHARED_DIR" 2>/dev/null
+        PIPE_RC=${PIPESTATUS[1]}
 
-        # Rename extracted 'ollama' -> 'ollama-linux'
+        # Rename extracted 'bin/ollama' -> 'bin/ollama-linux'
         if [ -f "$SHARED_BIN/ollama" ]; then
             mv "$SHARED_BIN/ollama" "$OLLAMA_BIN"
         fi
 
-        if [ "$PIPE_RC" -ne 0 ] || ! is_elf "$OLLAMA_BIN"; then
-            echo -e "${RED}      ERROR: Extraction failed or binary is invalid!${RST}"
+        if [ "$PIPE_RC" -ne 0 ] || ! ollama_runtime_ok "$OLLAMA_BIN"; then
+            echo -e "${RED}      ERROR: Extraction failed or runtime is incomplete!${RST}"
             rm -f "$OLLAMA_BIN"
+            rm -rf "$SHARED_DIR/lib"
             DOWNLOAD_ERRORS+=("Ollama Engine")
         else
             chmod +x "$OLLAMA_BIN"
@@ -616,10 +628,9 @@ if [ ! -x "$OLLAMA_BIN" ]; then
     echo -e "${RED}      Please re-run the installer to download Ollama.${RST}"
 else
     OLLAMA_RUNTIME="$OLLAMA_DATA/../.ollama-runtime"
-    mkdir -p "$OLLAMA_RUNTIME/runners" "$OLLAMA_RUNTIME/tmp"
+    mkdir -p "$OLLAMA_RUNTIME/tmp"
     export OLLAMA_MODELS="$OLLAMA_DATA"
     export OLLAMA_HOME="$OLLAMA_RUNTIME"
-    export OLLAMA_RUNNERS_DIR="$OLLAMA_RUNTIME/runners"
     export OLLAMA_TMPDIR="$OLLAMA_RUNTIME/tmp"
     export OLLAMA_ORIGINS="*"
     export OLLAMA_HOST="127.0.0.1:11434"
@@ -633,45 +644,60 @@ else
     HOME="$OLLAMA_RUNTIME" "$OLLAMA_BIN" serve > "$OLLAMA_RUNTIME/install.log" 2>&1 &
     OLLAMA_PID=$!
 
-    # Wait for it to be ready
+    # Wait for API to be ready
+    READY=false
     for i in $(seq 1 30); do
-        curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && break
+        if curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+            READY=true
+            break
+        fi
         sleep 1
     done
 
-    cd "$MODELS_DIR" || exit 1
+    if ! $READY; then
+        echo -e "${RED}      ERROR: Ollama failed to start for import.${RST}"
+        DOWNLOAD_ERRORS+=("Ollama Import: server did not become ready")
+        kill "$OLLAMA_PID" 2>/dev/null
+        wait "$OLLAMA_PID" 2>/dev/null
+    else
+        cd "$MODELS_DIR" || exit 1
 
-    import_model() {
-        local LOCAL=$1 NAME=$2 FILE=$3 MINB=$4
-        local GGUF="$MODELS_DIR/$FILE"
-        if ! file_ok "$GGUF" "$MINB"; then
-            echo -e "${RED}      Skipping ${NAME} - GGUF file not found or incomplete${RST}"
-            return
+        import_model() {
+            local LOCAL=$1 NAME=$2 FILE=$3 MINB=$4
+            local GGUF="$MODELS_DIR/$FILE"
+            if ! file_ok "$GGUF" "$MINB"; then
+                echo -e "${RED}      Skipping ${NAME} - GGUF file not found or incomplete${RST}"
+                return
+            fi
+            echo -e "${YLW}      Importing ${NAME}...${RST}"
+            local OUTPUT
+            OUTPUT=$("$OLLAMA_BIN" create "$LOCAL" -f "Modelfile-${LOCAL}" 2>&1)
+            local RC=$?
+            if [ "$RC" -eq 0 ]; then
+                echo -e "${GRN}      ${NAME} imported successfully!${RST}"
+            else
+                echo -e "${RED}      ERROR: Failed to import ${NAME}${RST}"
+                echo -e "${DGR}      Output: ${OUTPUT}${RST}"
+                DOWNLOAD_ERRORS+=("Import failed: ${NAME}")
+            fi
+        }
+
+        for NUM in "${SELECTED_NUMS[@]}"; do
+            LOCAL=$(get_field "$NUM" LOCAL)
+            NAME=$(get_field "$NUM" NAME)
+            FILE=$(get_field "$NUM" FILE)
+            MINB=$(get_field "$NUM" MINB)
+            import_model "$LOCAL" "$NAME" "$FILE" "$MINB"
+        done
+
+        if $HAS_CUSTOM && [ -n "$CUSTOM_URL" ]; then
+            import_model "$CUSTOM_LOCAL" "Custom: $CUSTOM_FILE" "$CUSTOM_FILE" 100000000
         fi
-        echo -e "${YLW}      Importing ${NAME}...${RST}"
-        "$OLLAMA_BIN" create "$LOCAL" -f "Modelfile-${LOCAL}" 2>&1
-        if [ $? -eq 0 ]; then
-            echo -e "${GRN}      ${NAME} imported successfully!${RST}"
-        else
-            echo -e "${RED}      ERROR: Failed to import ${NAME}${RST}"
-        fi
-    }
 
-    for NUM in "${SELECTED_NUMS[@]}"; do
-        LOCAL=$(get_field "$NUM" LOCAL)
-        NAME=$(get_field "$NUM" NAME)
-        FILE=$(get_field "$NUM" FILE)
-        MINB=$(get_field "$NUM" MINB)
-        import_model "$LOCAL" "$NAME" "$FILE" "$MINB"
-    done
-
-    if $HAS_CUSTOM && [ -n "$CUSTOM_URL" ]; then
-        import_model "$CUSTOM_LOCAL" "Custom: $CUSTOM_FILE" "$CUSTOM_FILE" 100000000
+        echo -e "${DGR}      Stopping temporary Ollama server...${RST}"
+        kill "$OLLAMA_PID" 2>/dev/null
+        wait "$OLLAMA_PID" 2>/dev/null
     fi
-
-    echo -e "${DGR}      Stopping temporary Ollama server...${RST}"
-    kill "$OLLAMA_PID" 2>/dev/null
-    wait "$OLLAMA_PID" 2>/dev/null
 fi
 
 # ================================================================

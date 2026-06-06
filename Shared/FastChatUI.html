@@ -952,6 +952,21 @@
         min-width: 0;
         max-width: 700px;
       }
+
+      /* Assistant message status + stats */
+      .ai-status {
+        font-size: 12px;
+        color: var(--t3);
+        margin-bottom: 4px;
+        min-height: 16px;
+        font-weight: 500;
+      }
+      .ai-stats {
+        font-size: 11px;
+        color: var(--t3);
+        margin-top: 6px;
+        min-height: 14px;
+      }
       .usr .mc {
         display: flex;
         flex-direction: column;
@@ -2584,6 +2599,7 @@
       abort: null,
       models: [],
       model: localStorage.getItem('g-model') || '',
+      modelReady: false,
       globalSys: '',
       logMode: localStorage.getItem('logMode') || 'errors_only',
       mode: 'chat', // 'chat' or 'image'
@@ -2813,6 +2829,7 @@
           if (!r.ok) throw new Error();
           const d = await r.json();
           S.models = d.models || [];
+          S.modelReady = S.models.length > 0 && !!S.model;
           renderModelMenu();
           if (
             S.models.length &&
@@ -2822,9 +2839,17 @@
           } else if (S.model) {
             applyModel(S.model);
           }
+          if (!S.models.length) {
+            D.modelMenu.innerHTML =
+              '<div style="padding:16px;font-size:12px;color:var(--orange);text-align:center;">Engine online — no models installed.<br>Run the installer to add a model.</div>';
+          }
+          updateSend();
         } catch {
+          S.models = [];
+          S.modelReady = false;
           D.modelMenu.innerHTML =
             '<div style="padding:16px;font-size:12px;color:var(--red);text-align:center;">Engine Offline</div>';
+          updateSend();
         }
       }
 
@@ -3150,12 +3175,14 @@
 
       function applyModel(model) {
         S.model = model;
+        S.modelReady = !!model && S.models.some((m) => m.name === model);
         localStorage.setItem('g-model', model);
-        D.modelName.textContent = model;
+        D.modelName.textContent = model || 'No model';
         $$('.mm-opt').forEach((opt) =>
           opt.classList.toggle('sel', opt.dataset.model === model),
         );
         checkVisionWarn();
+        updateSend();
       }
 
       function toggleModelMenu(show) {
@@ -3400,6 +3427,14 @@
       // ÔöÇÔöÇ Send / Stream to Ollama ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
       async function sendMsg(text) {
         if ((!text.trim() && !S.attachments.length) || S.streaming) return;
+        if (!S.model || !S.modelReady) {
+          if (S.models.length === 0) {
+            toast('No models installed. Run the installer first.');
+          } else {
+            toast('No model selected. Please wait for the engine to load.');
+          }
+          return;
+        }
 
         let conv = getConv();
         if (!conv) {
@@ -3493,6 +3528,7 @@
           ts: Date.now(),
           liked: false,
           disliked: false,
+          stats: null,
         };
         conv.msgs.push(aiMsg);
         renderChat();
@@ -3500,11 +3536,33 @@
 
         const lastRow = D.msgs.lastElementChild;
         const contentEl = lastRow ? lastRow.querySelector('.mt') : null;
+        const statusEl = lastRow ? lastRow.querySelector('.ai-status') : null;
+        const statsEl = lastRow ? lastRow.querySelector('.ai-stats') : null;
+        if (statusEl) statusEl.textContent = 'Thinking';
         if (contentEl)
           contentEl.innerHTML =
             '<div class="typ"><span></span><span></span><span></span></div>';
 
         S.abort = new AbortController();
+        let timedOut = false;
+        const CHAT_TIMEOUT_MS = 120000; // 2 min safety net
+        const chatTimeout = setTimeout(() => {
+          timedOut = true;
+          if (S.abort) S.abort.abort();
+        }, CHAT_TIMEOUT_MS);
+
+        const statusTimers = [];
+        statusTimers.push(
+          setTimeout(() => {
+            if (S.streaming && statusEl) statusEl.textContent = 'Warming up model';
+          }, 8000),
+        );
+        statusTimers.push(
+          setTimeout(() => {
+            if (S.streaming && statusEl) statusEl.textContent = 'Still working';
+          }, 20000),
+        );
+
         let apiMsgs = [];
         if (conv.sys) apiMsgs.push({ role: 'system', content: conv.sys });
         conv.msgs.slice(0, -1).forEach((m) => {
@@ -3512,6 +3570,42 @@
           if (m.images) am.images = m.images;
           apiMsgs.push(am);
         });
+
+        const streamStart = performance.now();
+        let tokenCount = 0;
+        let lastRender = 0;
+        const RENDER_INTERVAL = 120;
+        let hasReceivedToken = false;
+
+        function updateStats() {
+          if (!statsEl) return;
+          const elapsed = (performance.now() - streamStart) / 1000;
+          const speed = elapsed > 0 ? (tokenCount / elapsed).toFixed(1) : '0.0';
+          statsEl.textContent = `${speed} tok/s`;
+        }
+
+        function closeOpenFences(text) {
+          const fences = (text.match(/^```/gm) || []).length;
+          if (fences % 2 === 1) {
+            return text + '\n\n```';
+          }
+          return text;
+        }
+
+        function renderLive() {
+          if (!contentEl) return;
+          const now = performance.now();
+          if (now - lastRender < RENDER_INTERVAL) return;
+          lastRender = now;
+          const text = closeOpenFences(aiMsg.content);
+          contentEl.innerHTML = renderMd(text);
+          contentEl.querySelectorAll('pre code:not(.hljs)').forEach((b) => {
+            try {
+              hljs.highlightElement(b);
+            } catch {}
+          });
+          scrollEnd();
+        }
 
         try {
           const res = await fetch(OLLAMA + '/api/chat', {
@@ -3529,7 +3623,20 @@
             }),
             signal: S.abort.signal,
           });
-          if (!res.ok) throw new Error('Ollama error ' + res.status);
+
+          if (!res.ok) {
+            let errMsg = 'Ollama error ' + res.status;
+            try {
+              const errBody = await res.json();
+              errMsg = errBody.error || errBody.message || errMsg;
+            } catch {
+              try {
+                const errText = await res.text();
+                if (errText) errMsg = errText.slice(0, 200);
+              } catch {}
+            }
+            throw new Error(errMsg);
+          }
 
           const reader = res.body.getReader();
           const dec = new TextDecoder();
@@ -3544,35 +3651,69 @@
               try {
                 const p = JSON.parse(line);
                 if (p.message?.content) {
-                  aiMsg.content += p.message.content;
-                  if (contentEl) contentEl.textContent = aiMsg.content;
-                  scrollEnd();
+                  const txt = p.message.content;
+                  aiMsg.content += txt;
+                  tokenCount += Math.max(1, Math.ceil(txt.length / 4));
+                  hasReceivedToken = true;
+                  if (statusEl) statusEl.textContent = '';
+                  renderLive();
+                  updateStats();
                 }
               } catch {}
             }
           }
+
+          const elapsed = (performance.now() - streamStart) / 1000;
+          aiMsg.stats = {
+            tokens: Math.ceil(aiMsg.content.length / 4),
+            elapsed: elapsed,
+            stopped: false,
+          };
+
           if (contentEl) {
             contentEl.innerHTML = renderMd(aiMsg.content);
-            contentEl.querySelectorAll('pre code').forEach((b) => {
+            contentEl.querySelectorAll('pre code:not(.hljs)').forEach((b) => {
               if (!b.classList.contains('hljs')) hljs.highlightElement(b);
             });
           }
+          if (statusEl) statusEl.textContent = '';
+          if (statsEl) {
+            const t = aiMsg.stats.tokens;
+            const s = aiMsg.stats.elapsed.toFixed(1);
+            statsEl.textContent = `${t} tokens • ${s} s`;
+          }
         } catch (err) {
           if (err.name === 'AbortError') {
+            const elapsed = (performance.now() - streamStart) / 1000;
             if (aiMsg.content) {
+              aiMsg.stats = {
+                tokens: Math.ceil(aiMsg.content.length / 4),
+                elapsed: elapsed,
+                stopped: true,
+              };
               if (contentEl) contentEl.innerHTML = renderMd(aiMsg.content);
-            } else if (contentEl)
-              contentEl.innerHTML =
-                '<span style="color:var(--t3);font-style:italic;">[Stopped]</span>';
+              if (statsEl) {
+                const t = aiMsg.stats.tokens;
+                const s = aiMsg.stats.elapsed.toFixed(1);
+                statsEl.textContent = `${t} tokens • ${s} s • stopped`;
+              }
+            } else if (contentEl) {
+              contentEl.innerHTML = timedOut
+                ? '<span style="color:var(--red);">⚠ Timed out (engine may still be loading the model — try again in a moment).</span>'
+                : '<span style="color:var(--t3);font-style:italic;">[Stopped]</span>';
+            }
           } else {
             if (contentEl)
-              contentEl.innerHTML = `<span style="color:var(--red);">ÔÜá ${esc(err.message)}</span>`;
+              contentEl.innerHTML = `<span style="color:var(--red);">⚠ ${esc(err.message)}</span>`;
             conv.msgs.pop();
           }
         } finally {
+          clearTimeout(chatTimeout);
+          statusTimers.forEach(clearTimeout);
           S.streaming = false;
           updateSend();
           save();
+          renderChat();
           scrollEnd();
           setTimeout(() => D.inp.focus(), 100);
         }
@@ -3688,10 +3829,18 @@
             <button class="mab ${msg.disliked ? 'dlk' : ''}" onclick="rateMsg('${msg.id}','dislike')" title="Bad response"><i class="fa-regular fa-thumbs-down"></i></button>
         </div>`
             : '';
+        const statsText = msg.stats
+          ? `${msg.stats.tokens} tokens • ${msg.stats.elapsed.toFixed(1)} s${msg.stats.stopped ? ' • stopped' : ''}`
+          : '';
 
         return `<div class="mr">
         <div class="ma ai"><svg viewBox="0 0 24 24"><path d="M12 2L14.09 8.26L21 9.27L16 14.14L17.18 21.02L12 17.77L6.82 21.02L8 14.14L3 9.27L9.91 8.26L12 2Z" fill="white"/></svg></div>
-        <div class="mc"><div class="mt">${parsed || ''}</div>${actions}</div>
+        <div class="mc">
+          <div class="ai-status"></div>
+          <div class="mt">${parsed || ''}</div>
+          ${actions}
+          <div class="ai-stats">${statsText}</div>
+        </div>
     </div>`;
       }
 
@@ -3750,9 +3899,9 @@
           D.send.innerHTML = '<i class="fa-solid fa-stop"></i>';
           D.send.disabled = false;
         } else {
-          D.send.className = 'ib2 sbtn' + (has ? ' on' : '');
+          D.send.className = 'ib2 sbtn' + (has && S.modelReady ? ' on' : '');
           D.send.innerHTML = '<i class="fa-solid fa-arrow-up"></i>';
-          D.send.disabled = !has;
+          D.send.disabled = !has || !S.modelReady;
         }
       }
       function autoResize() {

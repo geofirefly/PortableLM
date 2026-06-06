@@ -20,15 +20,14 @@ mkdir -p "$OLLAMA_RUNTIME"
 # ---- Full portability: keep EVERYTHING on the USB ----
 export OLLAMA_MODELS="$SHARED_DIR/models/ollama_data"
 export OLLAMA_HOME="$OLLAMA_RUNTIME"
-export OLLAMA_RUNNERS_DIR="$OLLAMA_RUNTIME/runners"
 export OLLAMA_TMPDIR="$OLLAMA_RUNTIME/tmp"
 export OLLAMA_ORIGINS="*"
 export OLLAMA_HOST="127.0.0.1:11434"
-mkdir -p "$OLLAMA_RUNTIME/runners" "$OLLAMA_RUNTIME/tmp"
+mkdir -p "$OLLAMA_RUNTIME/tmp"
 # -------------------------------------------------------
 
 # Check if the portable Linux engine is downloaded
-if [ ! -f "$SHARED_DIR/bin/ollama-linux" ]; then
+if [ ! -f "$SHARED_DIR/bin/ollama-linux" ] || [ ! -f "$SHARED_DIR/lib/ollama/llama-server" ]; then
     echo "==================================================="
     echo "  ERROR: Linux AI Engine Not Found!"
     echo "==================================================="
@@ -51,9 +50,23 @@ else
     OLLAMA_PID=$!
     
     echo "Waiting for engine to initialize..."
-    until curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; do
+    READY=false
+    for i in $(seq 1 60); do
+        if curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+            READY=true
+            break
+        fi
         sleep 1
     done
+
+    if ! $READY; then
+        echo "ERROR: Engine failed to become ready within 60 seconds."
+        kill "$OLLAMA_PID" 2>/dev/null
+        wait "$OLLAMA_PID" 2>/dev/null
+        read -n 1 -s -r -p "Press any key to continue..."
+        echo ""
+        exit 1
+    fi
     echo "[OK] Engine is online!"
 fi
 

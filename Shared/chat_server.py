@@ -394,12 +394,8 @@ def _kill_ollama():
             subprocess.run(["taskkill", "/F", "/IM", "ollama app.exe"], capture_output=True)
             # Try to stop Windows service if present (requires admin, may fail silently)
             subprocess.run(["sc", "stop", "Ollama"], capture_output=True)
-            # Aggressive fallback: kill any process with 'ollama' in the name
-            try:
-                result = subprocess.run(["wmic", "process", "where", "name like '%ollama%'", "delete"],
-                                        capture_output=True, text=True, timeout=5)
-            except Exception:
-                pass
+            # (Removed aggressive WMIC fallback — it triggers AV heuristics
+            #  and the taskkill/pkill commands above are sufficient.)
         elif plat == "Linux":
             subprocess.run(["pkill", "-f", "ollama-linux"], capture_output=True)
             subprocess.run(["pkill", "-f", "ollama serve"], capture_output=True)
@@ -1216,6 +1212,47 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             request_context["model_stream"] = payload.get("stream", "-")
             request_context["model_temperature"] = payload.get("options", {}).get("temperature", "-")
 
+        # ── Local validation for chat requests ─────────────────────
+        if method == "POST" and "/api/chat" in ollama_path:
+            if not isinstance(payload, dict):
+                _log_event(
+                    logging.WARNING,
+                    "Rejected chat request: invalid JSON body",
+                    request_context=request_context,
+                )
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid JSON body"}).encode())
+                return
+            model_name = payload.get("model")
+            if not model_name or not str(model_name).strip():
+                _log_event(
+                    logging.WARNING,
+                    "Rejected chat request: missing or empty model field",
+                    request_context=request_context,
+                )
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Missing or empty model field"}).encode())
+                return
+            messages = payload.get("messages")
+            if not messages or not isinstance(messages, list) or len(messages) == 0:
+                _log_event(
+                    logging.WARNING,
+                    "Rejected chat request: missing or empty messages field",
+                    request_context=request_context,
+                )
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self._cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Missing or empty messages field"}).encode())
+                return
+
         try:
             # Handle fake /api/tags for llama.cpp mode
             if LLAMA_CPP_MODE and ollama_path == "/api/tags":
@@ -1258,6 +1295,12 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 lower = header.lower()
                 if lower not in ("transfer-encoding", "connection", "content-length"):
                     self.send_header(header, value)
+
+            # For streaming endpoints, force connection close so the browser
+            # knows when the stream body ends (otherwise HTTP/1.1 keep-alive
+            # can leave the fetch() ReadableStream hanging forever).
+            if is_stream:
+                self.send_header("Connection", "close")
 
             self._cors_headers()
             self.end_headers()

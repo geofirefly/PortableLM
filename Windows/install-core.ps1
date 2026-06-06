@@ -538,51 +538,94 @@ Write-Host ""
 Write-Host "[6/7] Downloading Ollama AI Engine (Windows)..." -ForegroundColor Yellow
 $OllamaURL  = "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip"
 $OllamaDest = "$USB_Drive\Shared\bin\ollama-windows-amd64.zip"
-$TempOllamaDir = "$USB_Drive\Shared\bin\temp_ollama"
+$OllamaExe  = "$USB_Drive\Shared\bin\ollama-windows.exe"
 
-if (Test-Path "$USB_Drive\Shared\bin\ollama-windows.exe") {
+function Test-OllamaComplete {
+    return (Test-Path $OllamaExe) -and (Test-Path "$USB_Drive\Shared\lib\ollama\llama-server.exe")
+}
+
+if (Test-OllamaComplete) {
     Write-Host "      Ollama already installed! Skipping..." -ForegroundColor Green
-} elseif (Copy-ModelFromDriveRoot -FileName "ollama-windows.exe" -DestPath "$USB_Drive\Shared\bin\ollama-windows.exe" -MinSize 10000000) {
-    # copied from drive root
 } else {
-    # Check drive root for the ZIP archive
-    $driveRootZip = Join-Path $DriveRoot "ollama-windows-amd64.zip"
-    if (Test-Path $driveRootZip) {
-        $zipSize = (Get-Item $driveRootZip).Length
-        if ($zipSize -gt 10000000) {
-            $sizeGB = [math]::Round($zipSize / 1GB, 2)
-            Write-Host ""
-            Write-Host "  Found 'ollama-windows-amd64.zip' in drive root ($sizeGB GB)." -ForegroundColor Cyan
-            $useZip = Read-Host "  Use this archive instead of downloading? (yes/no)"
-            if ($useZip.Trim().ToLower() -eq "yes" -or $useZip.Trim().ToLower() -eq "y") {
-                Copy-Item -Path $driveRootZip -Destination $OllamaDest -Force
-                Write-Host "      Copied archive from drive root." -ForegroundColor Green
+    # Incomplete install: remove the lone exe so we re-extract the full archive
+    if (Test-Path $OllamaExe) {
+        Write-Host "      Ollama install incomplete (missing runtime files). Refreshing..." -ForegroundColor Yellow
+        Remove-Item $OllamaExe -Force -ErrorAction SilentlyContinue
+    }
+
+    $copied = Copy-ModelFromDriveRoot -FileName "ollama-windows.exe" -DestPath $OllamaExe -MinSize 10000000
+    if ($copied -and (Test-OllamaComplete)) {
+        # fully complete after copying from drive root
+    } else {
+        if ($copied) {
+            Write-Host "      Copied exe is missing runtime files. Downloading full archive..." -ForegroundColor Yellow
+        }
+
+        # Check drive root for the ZIP archive
+        $driveRootZip = Join-Path $DriveRoot "ollama-windows-amd64.zip"
+        if (Test-Path $driveRootZip) {
+            $zipSize = (Get-Item $driveRootZip).Length
+            if ($zipSize -gt 10000000) {
+                $sizeGB = [math]::Round($zipSize / 1GB, 2)
+                Write-Host ""
+                Write-Host "  Found 'ollama-windows-amd64.zip' in drive root ($sizeGB GB)." -ForegroundColor Cyan
+                $useZip = Read-Host "  Use this archive instead of downloading? (yes/no)"
+                if ($useZip.Trim().ToLower() -eq "yes" -or $useZip.Trim().ToLower() -eq "y") {
+                    Copy-Item -Path $driveRootZip -Destination $OllamaDest -Force
+                    Write-Host "      Copied archive from drive root." -ForegroundColor Green
+                }
             }
         }
-    }
 
-    if (-not (Test-Path $OllamaDest)) {
-        curl.exe -L --ssl-no-revoke --progress-bar $OllamaURL -o $OllamaDest
-    }
-
-    if (Test-Path $OllamaDest) {
-        Write-Host "      Extracting Ollama..." -ForegroundColor Yellow
-        try {
-            New-Item -ItemType Directory -Force -Path $TempOllamaDir | Out-Null
-            Expand-ZipArchive -ZipPath $OllamaDest -DestDir $TempOllamaDir
-            # Move the ollama.exe up and rename it to explicitly be ollama-windows.exe
-            Move-Item -Path "$TempOllamaDir\ollama.exe" -Destination "$USB_Drive\Shared\bin\ollama-windows.exe" -Force
-            # Cleanup
-            Remove-Item $TempOllamaDir -Force -Recurse -ErrorAction SilentlyContinue
-            Remove-Item $OllamaDest -Force -ErrorAction SilentlyContinue
-            Write-Host "      Ollama Setup Complete!" -ForegroundColor Green
-        } catch {
-            Write-Host "      ERROR: Failed to extract Ollama. Please extract manually." -ForegroundColor Red
-            Write-Host "      File: $OllamaDest" -ForegroundColor DarkGray
+        if (-not (Test-Path $OllamaDest)) {
+            curl.exe -L --ssl-no-revoke --progress-bar $OllamaURL -o $OllamaDest
         }
-    } else {
-        Write-Host "      ERROR: Ollama download failed!" -ForegroundColor Red
-        $downloadErrors += "Ollama Engine"
+
+        if (Test-Path $OllamaDest) {
+            Write-Host "      Extracting Ollama..." -ForegroundColor Yellow
+            try {
+                $TempOllamaDir = "$USB_Drive\Shared\bin\temp_ollama"
+                New-Item -ItemType Directory -Force -Path $TempOllamaDir | Out-Null
+                Expand-ZipArchive -ZipPath $OllamaDest -DestDir $TempOllamaDir
+                # If the archive had a top-level folder, flatten it
+                $subDirs = Get-ChildItem -Path $TempOllamaDir -Directory -ErrorAction SilentlyContinue
+                if ($subDirs.Count -eq 1) {
+                    $subDir = $subDirs[0].FullName
+                    Get-ChildItem -Path $subDir | Move-Item -Destination $TempOllamaDir -Force
+                    Remove-Item -Path $subDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                # Move all extracted files up to Shared\bin
+                Get-ChildItem -Path $TempOllamaDir | Move-Item -Destination "$USB_Drive\Shared\bin" -Force
+                Remove-Item -Path $TempOllamaDir -Recurse -Force -ErrorAction SilentlyContinue
+                # Rename ollama.exe to ollama-windows.exe (preserve all other runtime files)
+                if (Test-Path "$USB_Drive\Shared\bin\ollama.exe") {
+                    # Kill any running instance so we can overwrite the destination
+                    Stop-Process -Name "ollama-windows" -Force -ErrorAction SilentlyContinue
+                    Stop-Process -Name "ollama" -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 1
+                    if (Test-Path $OllamaExe) {
+                        Remove-Item $OllamaExe -Force -ErrorAction SilentlyContinue
+                    }
+                    Move-Item -Path "$USB_Drive\Shared\bin\ollama.exe" -Destination $OllamaExe -Force -ErrorAction Stop
+                }
+                # Ensure runtime files are in lib/ollama/ (not bin/ollama/)
+                if (Test-Path "$USB_Drive\Shared\bin\ollama") {
+                    if (-not (Test-Path "$USB_Drive\Shared\lib")) {
+                        New-Item -ItemType Directory -Force -Path "$USB_Drive\Shared\lib" | Out-Null
+                    }
+                    Move-Item -Path "$USB_Drive\Shared\bin\ollama" -Destination "$USB_Drive\Shared\lib\ollama" -Force -ErrorAction Stop
+                }
+                Remove-Item $OllamaDest -Force -ErrorAction SilentlyContinue
+                Write-Host "      Ollama Setup Complete!" -ForegroundColor Green
+            } catch {
+                Write-Host "      ERROR: Failed to extract Ollama. Please extract manually." -ForegroundColor Red
+                Write-Host "      File: $OllamaDest" -ForegroundColor DarkGray
+                $downloadErrors += "Ollama Engine extraction failed"
+            }
+        } else {
+            Write-Host "      ERROR: Ollama download failed!" -ForegroundColor Red
+            $downloadErrors += "Ollama Engine"
+        }
     }
 }
 
@@ -679,15 +722,41 @@ if (-Not (Test-Path "$USB_Drive\Shared\bin\ollama-windows.exe")) {
     if ($modelsToImport.Count -gt 0) {
         Write-Host "      Starting Ollama temporarily to perform import..." -ForegroundColor DarkGray
         $ServerProcess = Start-Process -FilePath "$USB_Drive\Shared\bin\ollama-windows.exe" -ArgumentList "serve" -WindowStyle Hidden -PassThru
-        Start-Sleep -Seconds 5
+
+        # Poll for Ollama readiness (up to 30 seconds)
+        $ready = $false
+        for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+                $resp = Invoke-WebRequest -Uri "http://127.0.0.1:11434/api/tags" -UseBasicParsing -ErrorAction Stop
+                if ($resp.StatusCode -eq 200) {
+                    $ready = $true
+                    break
+                }
+            } catch {}
+        }
+
+        if (-not $ready) {
+            Write-Host "      ERROR: Ollama server did not become ready in 30 seconds." -ForegroundColor Red
+            $downloadErrors += "Ollama Import: server did not become ready"
+        }
 
         foreach ($m in $modelsToImport) {
             Write-Host "      Importing $($m.Name)..." -ForegroundColor Yellow
-            try {
-                $null = & "$USB_Drive\Shared\bin\ollama-windows.exe" create $m.Local -f "Modelfile-$($m.Local)" 2>&1
+            $outputFile = [System.IO.Path]::GetTempFileName()
+            & "$USB_Drive\Shared\bin\ollama-windows.exe" create $m.Local -f "Modelfile-$($m.Local)" > $outputFile 2>&1
+            $exitCode = $LASTEXITCODE
+            $createOutput = Get-Content -Path $outputFile -Raw -ErrorAction SilentlyContinue
+            Remove-Item $outputFile -Force -ErrorAction SilentlyContinue
+
+            if ($exitCode -eq 0) {
                 Write-Host "      $($m.Name) imported successfully!" -ForegroundColor Green
-            } catch {
-                Write-Host "      ERROR: Failed to import $($m.Name)" -ForegroundColor Red
+            } else {
+                Write-Host "      ERROR: Failed to import $($m.Name) (exit code: $exitCode)" -ForegroundColor Red
+                if ($createOutput) {
+                    Write-Host "      Output: $createOutput" -ForegroundColor DarkGray
+                }
+                $downloadErrors += "Import failed: $($m.Name)"
             }
         }
 

@@ -334,6 +334,7 @@ echo ""
 echo -e "${YLW}[4/7] Downloading AI Model(s)...${RST}"
 
 DOWNLOAD_ERRORS=()
+IMPORT_ERRORS=()
 MODEL_INDEX=0
 TOTAL_MODELS=$((${#SELECTED_NUMS[@]} + ($HAS_CUSTOM && true || false)))
 
@@ -461,48 +462,101 @@ echo ""
 echo -e "${YLW}[6/7] Downloading Ollama AI Engine (Mac)...${RST}"
 
 OLLAMA_BIN="$SHARED_BIN/ollama-darwin"
+OLLAMA_LIB_DIR="$SHARED_DIR/lib/ollama"
 ARCHIVE_URL="https://github.com/ollama/ollama/releases/latest/download/ollama-darwin.tgz"
 
-# Validate: must exist, be a real Mach-O binary, and > 10 MB
-if [ -f "$OLLAMA_BIN" ] && is_macho "$OLLAMA_BIN" && file_ok "$OLLAMA_BIN" 10000000; then
-    echo -e "${GRN}      Ollama already installed! Skipping...${RST}"
+ollama_runtime_ok() {
+    [ -f "$OLLAMA_BIN" ] || return 1
+    is_macho "$OLLAMA_BIN" || return 1
+    file_ok "$OLLAMA_BIN" 10000000 || return 1
+    [ -f "$OLLAMA_LIB_DIR/llama-server" ] || return 1
+    return 0
+}
+
+if ollama_runtime_ok; then
+    echo -e "${GRN}      Ollama runtime already installed! Skipping...${RST}"
 else
-    rm -f "$OLLAMA_BIN"
+    # If binary exists but runtime is incomplete, wipe it so we do a fresh download
+    if [ -f "$OLLAMA_BIN" ] && [ ! -f "$OLLAMA_LIB_DIR/llama-server" ]; then
+        echo -e "${YLW}      Ollama binary found but runtime files missing. Refreshing...${RST}"
+        rm -f "$OLLAMA_BIN"
+        rm -rf "$OLLAMA_LIB_DIR"
+    fi
 
     # Check drive root for existing binary
-    if copy_from_drive_root "ollama-darwin" "$OLLAMA_BIN" 10000000; then
-        if is_macho "$OLLAMA_BIN"; then
-            chmod +x "$OLLAMA_BIN"
-            xattr -d com.apple.quarantine "$OLLAMA_BIN" 2>/dev/null
-            echo -e "${GRN}      Ollama engine ready (copied from drive root)!${RST}"
-        else
-            echo -e "${RED}      WARNING: Copied file is not a valid Mach-O binary. Will download.${RST}"
-            rm -f "$OLLAMA_BIN"
+    if [ ! -f "$OLLAMA_BIN" ]; then
+        if copy_from_drive_root "ollama-darwin" "$OLLAMA_BIN" 10000000; then
+            if ! is_macho "$OLLAMA_BIN"; then
+                echo -e "${RED}      WARNING: Copied file is not a valid Mach-O binary. Will download.${RST}"
+                rm -f "$OLLAMA_BIN"
+            fi
         fi
     fi
 
-    if [ ! -f "$OLLAMA_BIN" ]; then
-        echo -e "      Downloading Ollama engine (streaming - stops after binary extracted)..."
-        # Stream curl → tar: 'ollama' is the first entry in the tgz,
-        # so tar exits as soon as it extracts it and the download stops early.
-        curl -L --fail "$ARCHIVE_URL" | \
-            tar -xzf - -C "$SHARED_BIN" ollama 2>/dev/null
-        PIPE_RC=${PIPESTATUS[1]}
+    if ! ollama_runtime_ok; then
+        rm -f "$OLLAMA_BIN"
+        rm -rf "$OLLAMA_LIB_DIR"
+        mkdir -p "$SHARED_BIN" "$OLLAMA_LIB_DIR"
 
-        # Rename extracted 'ollama' -> 'ollama-darwin'
-        if [ -f "$SHARED_BIN/ollama" ]; then
-            mv "$SHARED_BIN/ollama" "$OLLAMA_BIN"
+        echo -e "      Downloading Ollama engine..."
+        TMP_TGZ="$SHARED_BIN/.ollama-darwin.tgz"
+        curl -L --fail "$ARCHIVE_URL" -o "$TMP_TGZ"
+        if [ -f "$TMP_TGZ" ]; then
+            TMP_EXTRACT="$SHARED_BIN/.ollama-extract"
+            rm -rf "$TMP_EXTRACT"
+            mkdir -p "$TMP_EXTRACT"
+            tar -xzf "$TMP_TGZ" -C "$TMP_EXTRACT"
+            TGZ_RC=$?
+            rm -f "$TMP_TGZ"
+
+            if [ "$TGZ_RC" -eq 0 ]; then
+                # Support future layout that already uses lib/ollama internally
+                if [ -d "$TMP_EXTRACT/lib/ollama" ]; then
+                    mkdir -p "$OLLAMA_LIB_DIR"
+                    for item in "$TMP_EXTRACT/lib/ollama/"*; do
+                        [ -e "$item" ] || continue
+                        mv "$item" "$OLLAMA_LIB_DIR"/ 2>/dev/null || true
+                    done
+                    if [ -f "$TMP_EXTRACT/bin/ollama" ]; then
+                        mv "$TMP_EXTRACT/bin/ollama" "$OLLAMA_BIN" 2>/dev/null || true
+                    elif [ -f "$TMP_EXTRACT/ollama" ]; then
+                        mv "$TMP_EXTRACT/ollama" "$OLLAMA_BIN" 2>/dev/null || true
+                    fi
+                else
+                    # Current layout: everything at archive root
+                    if [ -f "$TMP_EXTRACT/ollama" ]; then
+                        mv "$TMP_EXTRACT/ollama" "$OLLAMA_BIN"
+                    fi
+                    for item in "$TMP_EXTRACT"/*; do
+                        [ -e "$item" ] || continue
+                        basename_item=$(basename "$item")
+                        [ "$basename_item" = "ollama" ] && continue
+                        mv "$item" "$OLLAMA_LIB_DIR"/ 2>/dev/null || true
+                    done
+                fi
+                rm -rf "$TMP_EXTRACT"
+            fi
         fi
 
-        if [ "$PIPE_RC" -ne 0 ] || ! is_macho "$OLLAMA_BIN"; then
-            echo -e "${RED}      ERROR: Extraction failed or binary is invalid!${RST}"
-            rm -f "$OLLAMA_BIN"
-            DOWNLOAD_ERRORS+=("Ollama Engine")
-        else
+        if ollama_runtime_ok; then
             chmod +x "$OLLAMA_BIN"
-            xattr -d com.apple.quarantine "$OLLAMA_BIN" 2>/dev/null
+            [ -f "$OLLAMA_LIB_DIR/llama-server" ] && chmod +x "$OLLAMA_LIB_DIR/llama-server" 2>/dev/null || true
+            [ -f "$OLLAMA_LIB_DIR/llama-quantize" ] && chmod +x "$OLLAMA_LIB_DIR/llama-quantize" 2>/dev/null || true
+            xattr -dr com.apple.quarantine "$OLLAMA_BIN" "$OLLAMA_LIB_DIR" 2>/dev/null || true
             echo -e "${GRN}      Ollama Mac Engine ready!${RST}"
+        else
+            echo -e "${RED}      ERROR: Ollama extraction failed or runtime is incomplete!${RST}"
+            rm -f "$OLLAMA_BIN"
+            rm -rf "$OLLAMA_LIB_DIR"
+            DOWNLOAD_ERRORS+=("Ollama Engine")
         fi
+    elif [ -f "$OLLAMA_BIN" ]; then
+        # Runtime ok but came from drive root or previous install, ensure perms
+        chmod +x "$OLLAMA_BIN"
+        [ -f "$OLLAMA_LIB_DIR/llama-server" ] && chmod +x "$OLLAMA_LIB_DIR/llama-server" 2>/dev/null || true
+        [ -f "$OLLAMA_LIB_DIR/llama-quantize" ] && chmod +x "$OLLAMA_LIB_DIR/llama-quantize" 2>/dev/null || true
+        xattr -dr com.apple.quarantine "$OLLAMA_BIN" "$OLLAMA_LIB_DIR" 2>/dev/null || true
+        echo -e "${GRN}      Ollama Mac Engine ready!${RST}"
     fi
 fi
 
@@ -590,56 +644,73 @@ if [ ! -x "$OLLAMA_BIN" ]; then
     echo -e "${RED}      Please re-run the installer to download Ollama.${RST}"
 else
     OLLAMA_RUNTIME="$OLLAMA_DATA/../.ollama-runtime"
-    mkdir -p "$OLLAMA_RUNTIME/runners" "$OLLAMA_RUNTIME/tmp"
+    mkdir -p "$OLLAMA_RUNTIME/tmp"
     export OLLAMA_MODELS="$OLLAMA_DATA"
     export OLLAMA_HOME="$OLLAMA_RUNTIME"
-    export OLLAMA_RUNNERS_DIR="$OLLAMA_RUNTIME/runners"
     export OLLAMA_TMPDIR="$OLLAMA_RUNTIME/tmp"
     export OLLAMA_ORIGINS="*"
     export OLLAMA_HOST="127.0.0.1:11434"
 
     # Kill any stale Ollama process
     pkill -f "ollama-darwin" 2>/dev/null
-    sleep 2
+    sleep 1
 
     echo -e "${DGR}      Starting Ollama temporarily for import...${RST}"
     HOME="$OLLAMA_RUNTIME" "$OLLAMA_BIN" serve > "$OLLAMA_RUNTIME/install.log" 2>&1 &
     OLLAMA_PID=$!
 
+    READY=false
     for i in $(seq 1 30); do
-        curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && break
+        if curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1; then
+            READY=true
+            break
+        fi
         sleep 1
     done
 
-    cd "$MODELS_DIR" || exit 1
+    if ! $READY; then
+        echo -e "${RED}      ERROR: Ollama failed to start. Cannot import models.${RST}"
+        kill "$OLLAMA_PID" 2>/dev/null
+        wait "$OLLAMA_PID" 2>/dev/null
+        IMPORT_ERRORS+=("Ollama failed to start")
+    else
+        cd "$MODELS_DIR" || exit 1
 
-    import_model() {
-        local LOCAL=$1 NAME=$2 FILE=$3 MINB=$4
-        local GGUF="$MODELS_DIR/$FILE"
-        if ! file_ok "$GGUF" "$MINB"; then
-            echo -e "${RED}      Skipping ${NAME} - GGUF file not found or incomplete${RST}"; return
+        import_model() {
+            local LOCAL=$1 NAME=$2 FILE=$3 MINB=$4
+            local GGUF="$MODELS_DIR/$FILE"
+            if ! file_ok "$GGUF" "$MINB"; then
+                echo -e "${RED}      Skipping ${NAME} - GGUF file not found or incomplete${RST}"
+                IMPORT_ERRORS+=("${NAME} - missing/incomplete GGUF")
+                return
+            fi
+            echo -e "${YLW}      Importing ${NAME}...${RST}"
+            local IMPORT_OUT
+            IMPORT_OUT=$("$OLLAMA_BIN" create "$LOCAL" -f "Modelfile-${LOCAL}" 2>&1)
+            local IMPORT_RC=$?
+            if [ "$IMPORT_RC" -eq 0 ]; then
+                echo -e "${GRN}      ${NAME} imported successfully!${RST}"
+            else
+                echo -e "${RED}      ERROR: Failed to import ${NAME}${RST}"
+                echo -e "${DGR}      Output:${RST}"
+                echo "$IMPORT_OUT" | sed 's/^/        /'
+                IMPORT_ERRORS+=("${NAME}")
+            fi
+        }
+
+        for NUM in "${SELECTED_NUMS[@]}"; do
+            import_model "$(get_field "$NUM" LOCAL)" "$(get_field "$NUM" NAME)" \
+                         "$(get_field "$NUM" FILE)" "$(get_field "$NUM" MINB)"
+        done
+
+        if $HAS_CUSTOM && [ -n "$CUSTOM_URL" ]; then
+            import_model "$CUSTOM_LOCAL" "Custom: $CUSTOM_FILE" "$CUSTOM_FILE" 100000000
         fi
-        echo -e "${YLW}      Importing ${NAME}...${RST}"
-        "$OLLAMA_BIN" create "$LOCAL" -f "Modelfile-${LOCAL}" 2>&1
-        if [ $? -eq 0 ]; then
-            echo -e "${GRN}      ${NAME} imported successfully!${RST}"
-        else
-            echo -e "${RED}      ERROR: Failed to import ${NAME}${RST}"
-        fi
-    }
 
-    for NUM in "${SELECTED_NUMS[@]}"; do
-        import_model "$(get_field "$NUM" LOCAL)" "$(get_field "$NUM" NAME)" \
-                     "$(get_field "$NUM" FILE)" "$(get_field "$NUM" MINB)"
-    done
-
-    if $HAS_CUSTOM && [ -n "$CUSTOM_URL" ]; then
-        import_model "$CUSTOM_LOCAL" "Custom: $CUSTOM_FILE" "$CUSTOM_FILE" 100000000
+        echo -e "${DGR}      Stopping temporary Ollama server...${RST}"
+        kill "$OLLAMA_PID" 2>/dev/null
+        wait "$OLLAMA_PID" 2>/dev/null
     fi
-
-    echo -e "${DGR}      Stopping temporary Ollama server...${RST}"
-    kill "$OLLAMA_PID" 2>/dev/null
-    wait "$OLLAMA_PID" 2>/dev/null
 fi
 
 # ================================================================
@@ -648,14 +719,20 @@ fi
 echo ""
 echo -e "${CYN}==========================================================${RST}"
 
-if [ "${#DOWNLOAD_ERRORS[@]}" -gt 0 ]; then
+if [ "${#DOWNLOAD_ERRORS[@]}" -gt 0 ] || [ "${#IMPORT_ERRORS[@]}" -gt 0 ]; then
     echo -e "${YLW}   SETUP COMPLETE (with some errors)                      ${RST}"
     echo -e "${CYN}==========================================================${RST}"
     echo ""
-    echo -e "${RED}  The following had issues:${RST}"
-    for ERR in "${DOWNLOAD_ERRORS[@]}"; do echo -e "${RED}    ! ${ERR}${RST}"; done
+    if [ "${#DOWNLOAD_ERRORS[@]}" -gt 0 ]; then
+        echo -e "${RED}  Download issues:${RST}"
+        for ERR in "${DOWNLOAD_ERRORS[@]}"; do echo -e "${RED}    ! ${ERR}${RST}"; done
+    fi
+    if [ "${#IMPORT_ERRORS[@]}" -gt 0 ]; then
+        echo -e "${RED}  Import issues:${RST}"
+        for ERR in "${IMPORT_ERRORS[@]}"; do echo -e "${RED}    ! ${ERR}${RST}"; done
+    fi
     echo ""
-    echo -e "${YLW}  You can re-run install.command to retry failed downloads.${RST}"
+    echo -e "${YLW}  You can re-run install.command to retry failed downloads/imports.${RST}"
 else
     echo -e "${GRN}   SETUP COMPLETE! YOUR PORTABLE AI IS READY!             ${RST}"
     echo -e "${CYN}==========================================================${RST}"

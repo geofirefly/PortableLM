@@ -4,6 +4,19 @@
 
 With a unified architecture, you can initialize your AI models once and choose to keep them on your system or carry them with you across Windows, macOS, Linux, and Android.
 
+> ⚠️ **Antivirus / Windows SmartScreen Notice**
+>
+> Some antivirus programs (including Windows Defender) may show a warning when you run the installer or start the AI engine. This is a **false positive**.
+>
+> The project downloads the official open-source **Ollama** engine from GitHub. Because it is an **unsigned portable executable** running from a USB drive, heuristic scanners sometimes flag it.
+>
+> **What to do:**
+> - On Windows SmartScreen: click **"More info" → "Run anyway"**.
+> - On Windows Defender: click **"Allow on device"** or add your USB drive to the antivirus exclusion list.
+> - If a file was quarantined, restore `Shared/bin/ollama-windows.exe` (or `ollama-linux` / `ollama-darwin`) from your AV's quarantine and re-run the installer.
+>
+> We have removed all aggressive process-killing commands from the scripts to minimize AV triggers. If a specific AV still blocks the file, you can submit it as a false positive to your AV vendor.
+
 ## Core Features
 
 * **Zero Dependency Setup:** Ships with portable Python and isolated engine binaries. No system permissions, registry edits, or package managers required.
